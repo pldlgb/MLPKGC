@@ -94,6 +94,8 @@ class Experiment:
         print('Hits @1: {0}'.format(np.mean(hits[0])))
         print('Mean rank: {0}'.format(np.mean(ranks)))
         print('Mean reciprocal rank: {0}'.format(np.mean(1./np.array(ranks))))
+        MRR = np.mean(1./np.array(ranks))
+        return MRR
 
 
 
@@ -106,7 +108,10 @@ class Experiment:
         train_data_idxs = self.get_data_idxs(d.train_data)
         print("Number of training data points: %d" % len(train_data_idxs))
 
-        model = TuckER(d, self.ent_vec_dim, self.rel_vec_dim, **self.kwargs)
+        valid_res,test_res = 0., 0. 
+
+        # model = TuckER(d, self.ent_vec_dim, self.rel_vec_dim, **self.kwargs)
+        model = MLP(d, self.ent_vec_dim, self.rel_vec_dim, **self.kwargs)
         if self.cuda:
             model.cuda()
         model.init()
@@ -147,12 +152,15 @@ class Experiment:
             model.eval()
             with torch.no_grad():
                 print("Validation:")
-                self.evaluate(model, d.valid_data)
+                valid_MRR = self.evaluate(model, d.valid_data)
+                valid_res = max(valid_res, valid_MRR)
                 if not it%2:
                     print("Test:")
                     start_test = time.time()
-                    self.evaluate(model, d.test_data)
+                    test_MRR = self.evaluate(model, d.test_data)
+                    test_res = max(test_res, test_MRR)
                     print(time.time()-start_test)
+        print("Best result : valid {0} test {1}".format(valid_res,test_res))
            
 
         
