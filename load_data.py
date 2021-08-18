@@ -29,3 +29,23 @@ class Data:
     def get_entities(self, data):
         entities = sorted(list(set([d[0] for d in data]+[d[2] for d in data])))
         return entities
+    
+    def dis_entities(self):
+        train_entities = self.get_entities(self.train_data)
+        valid_entities = self.get_entities(self.valid_data)
+        test_entities  = self.get_entities(self.test_data)
+
+        dis_val_entities, dis_test_entities = [], []
+        for e in valid_entities:
+            if e not in train_entities:
+                dis_val_entities.append(e)
+        
+        for e in test_entities:
+            if e not in train_entities:
+                dis_test_entities.append(e)
+        
+        print("Valid  :  {}".format(len(dis_val_entities)))
+        print(dis_val_entities)
+        print("Test   :  {}".format(len(dis_test_entities)))
+        print(dis_test_entities)
+        print("-"*20)

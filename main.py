@@ -6,7 +6,7 @@ from collections import defaultdict
 from model import *
 from torch.optim.lr_scheduler import ExponentialLR
 import argparse
-
+from matplotlib import pyplot as plt
     
 class Experiment:
 
@@ -47,7 +47,11 @@ class Experiment:
             targets = targets.cuda()
         return np.array(batch), targets
 
-    
+    def save_model(self, model, save_dir):
+        print("Saving Model")
+        torch.save(model.state_dict(), (save_dir + "{}.pth").format("best_model"))
+        print("Done saving Model")
+
     def evaluate(self, model, data):
         hits = []
         ranks = []
@@ -97,10 +101,7 @@ class Experiment:
         MRR = np.mean(1./np.array(ranks))
         return MRR
 
-
-
-
-    def train_and_eval(self):
+    def train_and_eval(self,args):
         print("Training the TuckER model...")
         self.entity_idxs = {d.entities[i]:i for i in range(len(d.entities))}
         self.relation_idxs = {d.relations[i]:i for i in range(len(d.relations))}
@@ -108,10 +109,10 @@ class Experiment:
         train_data_idxs = self.get_data_idxs(d.train_data)
         print("Number of training data points: %d" % len(train_data_idxs))
 
-        valid_res,test_res = 0., 0. 
-
+        valid_res, test_res = 0., 0. 
+        best_epoch = 0
         # model = TuckER(d, self.ent_vec_dim, self.rel_vec_dim, **self.kwargs)
-        model = MLP(d, self.ent_vec_dim, self.rel_vec_dim, **self.kwargs)
+        model = MLP_2(d, self.ent_vec_dim, self.rel_vec_dim, **self.kwargs)
         if self.cuda:
             model.cuda()
         model.init()
@@ -158,18 +159,65 @@ class Experiment:
                     print("Test:")
                     start_test = time.time()
                     test_MRR = self.evaluate(model, d.test_data)
-                    test_res = max(test_res, test_MRR)
+                    if test_MRR > test_res:
+                        test_res = test_MRR
+                        best_epoch = it
+                        if test_res > args.best_result:
+                            self.save_model(model, save_dir)
                     print(time.time()-start_test)
         print("Best result : valid {0} test {1}".format(valid_res,test_res))
-           
+        print("Best epoch is {0}".format(best_epoch))
 
+    def pred_plot(self, save_dir, data):
+        self.entity_idxs = {d.entities[i]:i for i in range(len(d.entities))}
+        self.relation_idxs = {d.relations[i]:i for i in range(len(d.relations))}
+
+        train_data_idxs = self.get_data_idxs(d.train_data)
+        model = MLP_2(d, self.ent_vec_dim, self.rel_vec_dim, **self.kwargs)
+        model.load_state_dict(torch.load('{}/best_model.pth'.format(save_dir)), strict=False)
+        if self.cuda:
+            model.cuda()
+        test_data_idxs = self.get_data_idxs(data)
+        er_vocab = self.get_er_vocab(self.get_data_idxs(d.data))
+
+        print("Number of data points: %d" % len(test_data_idxs))
         
+        for i in range(0, len(test_data_idxs), self.batch_size):
+            data_batch, _ = self.get_batch(er_vocab, test_data_idxs, i)
+            e1_idx = torch.tensor(data_batch[:,0])
+            r_idx = torch.tensor(data_batch[:,1])
+            e2_idx = torch.tensor(data_batch[:,2])
+            if self.cuda:
+                e1_idx = e1_idx.cuda()
+                r_idx = r_idx.cuda()
+                e2_idx = e2_idx.cuda()
+            predictions = model.forward(e1_idx, r_idx)
+
+            for j in range(data_batch.shape[0]):
+                filt = er_vocab[(data_batch[j][0], data_batch[j][1])]
+                target_value = predictions[j,e2_idx[j]].item()
+                predictions[j, filt] = 0.0
+                predictions[j, e2_idx[j]] = target_value
+
+            sort_values, sort_idxs = torch.sort(predictions, dim=1, descending=True)
+            sort_idxs = sort_idxs.cpu().numpy()
+            sort_values = sort_values.detach().cpu().numpy()
+            for j in range(predictions.shape[0]):
+                rank = np.where(sort_idxs[j]==e2_idx[j].item())[0][0]
+            # if j % 100 == 0:
+                fig = plt.figure(figsize=(4,3))
+                plt.title("Rank : {}".format(rank))
+                plt.scatter(np.arange(len(sort_values[j])),sort_values[j])
+                plt.scatter(rank, sort_values[j][rank], c="red")
+                # plt.show()
+                plt.savefig("pic/{}.png".format(j))
+            break
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset", type=str, default="FB15k-237", nargs="?",
                     help="Which dataset to use: FB15k, FB15k-237, WN18 or WN18RR.")
-    parser.add_argument("--num_iterations", type=int, default=500, nargs="?",
+    parser.add_argument("--num_iterations", type=int, default=10, nargs="?",
                     help="Number of iterations.")
     parser.add_argument("--batch_size", type=int, default=128, nargs="?",
                     help="Batch size.")
@@ -191,9 +239,16 @@ if __name__ == '__main__':
                     help="Dropout after the second hidden layer.")
     parser.add_argument("--label_smoothing", type=float, default=0.1, nargs="?",
                     help="Amount of label smoothing.")
+    parser.add_argument("--reverse", type=bool, default=False, nargs="?",
+                    help="Whether to use reverse.")
+    parser.add_argument("--best_result", type=float, default=0.4, nargs="?",
+                    help="If larger than best result, then save.")
 
     args = parser.parse_args()
     dataset = args.dataset
+    print(dataset)
+    print("*"*20)
+    save_dir = "checkpoint/%s/" % dataset
     data_dir = "data/%s/" % dataset
     torch.backends.cudnn.deterministic = True 
     seed = 20
@@ -201,11 +256,17 @@ if __name__ == '__main__':
     torch.manual_seed(seed)
     if torch.cuda.is_available:
         torch.cuda.manual_seed_all(seed) 
-    d = Data(data_dir=data_dir, reverse=False)
+    d = Data(data_dir=data_dir, reverse=args.reverse)
+    d.dis_entities()
     experiment = Experiment(num_iterations=args.num_iterations, batch_size=args.batch_size, learning_rate=args.lr, 
                             decay_rate=args.dr, ent_vec_dim=args.edim, rel_vec_dim=args.rdim, cuda=args.cuda,
                             input_dropout=args.input_dropout, hidden_dropout1=args.hidden_dropout1, 
                             hidden_dropout2=args.hidden_dropout2, label_smoothing=args.label_smoothing)
-    experiment.train_and_eval()
+    # experiment.train_and_eval(args)
+    print(dataset)
+    experiment.pred_plot(save_dir, d.test_data)
+
+
+    
                 
 
