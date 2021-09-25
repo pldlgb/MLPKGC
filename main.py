@@ -57,13 +57,16 @@ class Experiment:
         ranks = []
         for i in range(10):
             hits.append([])
-
+        # test_data_idx : list[tuple[int, int, int]], get data triples indices
         test_data_idxs = self.get_data_idxs(data)
+        # er_vocab : defaultdict(list)
+        # first get global data triples, then build a dict like er_vocab[head, relation)].append(tail)
         er_vocab = self.get_er_vocab(self.get_data_idxs(d.data))
 
         print("Number of data points: %d" % len(test_data_idxs))
-        
+        # 
         for i in range(0, len(test_data_idxs), self.batch_size):
+            # take a batch size triples
             data_batch, _ = self.get_batch(er_vocab, test_data_idxs, i)
             e1_idx = torch.tensor(data_batch[:,0])
             r_idx = torch.tensor(data_batch[:,1])
@@ -72,21 +75,25 @@ class Experiment:
                 e1_idx = e1_idx.cuda()
                 r_idx = r_idx.cuda()
                 e2_idx = e2_idx.cuda()
+            # get predict score [batchsize, entity_type_size]
             predictions = model.forward(e1_idx, r_idx)
 
             for j in range(data_batch.shape[0]):
+                # filter exist correct triple, set the corresponding scores as 0, 
+                # and Retain the predicted score for the triple to be evaluated
                 filt = er_vocab[(data_batch[j][0], data_batch[j][1])]
                 target_value = predictions[j,e2_idx[j]].item()
                 predictions[j, filt] = 0.0
                 predictions[j, e2_idx[j]] = target_value
-
+            # sort the scores
             sort_values, sort_idxs = torch.sort(predictions, dim=1, descending=True)
 
             sort_idxs = sort_idxs.cpu().numpy()
             for j in range(data_batch.shape[0]):
+                # find the rank of positive triple
                 rank = np.where(sort_idxs[j]==e2_idx[j].item())[0][0]
                 ranks.append(rank+1)
-
+                # here could be changed to 'for hits_level in [1,3,5,10]'  
                 for hits_level in range(10):
                     if rank <= hits_level:
                         hits[hits_level].append(1.0)
