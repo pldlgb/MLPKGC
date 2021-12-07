@@ -14,6 +14,7 @@ class Data:
                 if i not in self.train_relations] + [i for i in self.test_relations \
                 if i not in self.train_relations]
 
+        print(len(self.relations))
     def load_data(self, data_dir, data_type="train", reverse=False):
         with open("%s%s.txt" % (data_dir, data_type), "r") as f:
             data = f.read().strip().split("\n")
@@ -21,13 +22,26 @@ class Data:
             if reverse:
                 data += [[i[2], i[1]+"_reverse", i[0]] for i in data]
         return data
-
+    def load_rev_data(self, data_dir):
+        all_data = []
+        for type in ["train","valid","test"]:
+            with open("%s%s.txt" % (data_dir, type), "r") as f:
+                data = f.read().strip().split("\n")
+                data = [i.split() for i in data]
+                rev_data = [[i[2], i[1]+"_reverse", i[0]] for i in data]
+                all_data += [rev_data]
+        self.train_data, self.valid_data, self.test_data = all_data[0],all_data[1],all_data[2]
+        self.data = self.train_data + self.valid_data + self.test_data
     def get_relations(self, data):
         relations = sorted(list(set([d[1] for d in data])))
         return relations
 
     def get_entities(self, data):
+        head=set([d[0] for d in data])
+        tail=set([d[2] for d in data])
+        print("head and tail intersection : ", len(head & tail))
         entities = sorted(list(set([d[0] for d in data]+[d[2] for d in data])))
+        print("Total entity :",len(entities))
         return entities
     
     def dis_entities(self):

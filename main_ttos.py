@@ -47,9 +47,9 @@ class Experiment:
             targets = targets.cuda()
         return np.array(batch), targets
 
-    def save_model(self, model, save_dir):
+    def save_model(self, model, save_dir, name):
         print("Saving Model")
-        torch.save(model.state_dict(), (save_dir + "{}.pth").format("best_teacher_model"))
+        torch.save(model.state_dict(), (save_dir + "{}.pth").format("best_model"+name))
         print("Done saving Model")
 
     def evaluate(self, model, data):
@@ -120,10 +120,17 @@ class Experiment:
         valid_res, test_res = 0., 0. 
         best_epoch = 0
         model = TuckER(d, self.ent_vec_dim, self.rel_vec_dim, **self.kwargs)
+        model_T = TuckER(d, self.ent_vec_dim, self.rel_vec_dim, **self.kwargs)
         # model = MLP_2(d, self.ent_vec_dim, self.rel_vec_dim, **self.kwargs)
         if self.cuda:
             model.cuda()
+            model_T.cuda()
         model.init()
+
+        PATH = (save_dir + "{}.pth").format("best_teacher_model")
+        model_T.load_state_dict(torch.load(PATH), strict=False)
+        model_T.eval()
+
         opt = torch.optim.Adam(model.parameters(), lr=self.learning_rate)
         if self.decay_rate:
             scheduler = ExponentialLR(opt, self.decay_rate)
@@ -146,10 +153,14 @@ class Experiment:
                 if self.cuda:
                     e1_idx = e1_idx.cuda()
                     r_idx = r_idx.cuda()
+                # from teacher learing
+                teacher_target = self.get_T_pred(model_T, e1_idx, r_idx, er_vocab, data_batch, 3)
                 predictions = model.forward(e1_idx, r_idx)
                 if self.label_smoothing:
-                    targets = ((1.0-self.label_smoothing)*targets) + (1.0/targets.size(1))           
-                loss = model.loss(predictions, targets)
+                    targets = ((1.0-self.label_smoothing)*targets) + (1.0/targets.size(1))  
+                teacher_target = ((1.0-self.label_smoothing)*teacher_target) + (1.0/targets.size(1))         
+                loss = model.loss(predictions, targets) + model.loss(predictions, teacher_target)
+                # loss = model.loss(predictions, teacher_target)
                 loss.backward()
                 opt.step()
                 losses.append(loss.item())
@@ -170,9 +181,7 @@ class Experiment:
                     if test_MRR > test_res:
                         test_res = test_MRR
                         best_epoch = it
-                        self.save_model(model, save_dir)
-                        # if test_res > args.best_result:
-                        #     self.save_model(model, save_dir)
+                        # self.save_model(model, save_dir, "student")
                     print(time.time()-start_test)
         print("Best result : valid {0} test {1}".format(valid_res,test_res))
         print("Best epoch is {0}".format(best_epoch))
@@ -221,6 +230,33 @@ class Experiment:
                 # plt.show()
                 plt.savefig("pic/{}.png".format(j))
             break
+    
+    def get_T_pred(self, model_T, e1_idx, r_idx, er_vocab, batch, PN):
+        batch = [tuple(i) for i in batch.tolist()]
+        pred = model_T.forward(e1_idx, r_idx) # batch_size * ent_size
+        sort_values, sort_idxs = torch.sort(pred, dim=1, descending=True)
+        targets = np.zeros((len(batch), len(d.entities)))
+        sort_values = sort_values.cpu().detach().numpy()
+        sort_idxs = sort_idxs.cpu().numpy()
+        for j in range(len(batch)):
+            train_tail = er_vocab[batch[j]]
+            t_idx = len(train_tail)+PN
+            # targets[j,sort_idxs[j,:t_idx]] = sort_values[j,:t_idx]+0.5
+            targets[j,sort_idxs[j,:t_idx]] = 1.0
+            # print("--"*15)
+            # print(train_tail)
+            # print(sort_idxs[j,:t_idx])
+            # print(sort_values[j,:t_idx])
+            # print("--"*15)
+        targets = torch.FloatTensor(targets)
+        if self.cuda:
+            targets = targets.cuda()
+        return targets   
+
+
+
+
+
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -236,7 +272,7 @@ if __name__ == '__main__':
                     help="Decay rate.")
     parser.add_argument("--edim", type=int, default=200, nargs="?",
                     help="Entity embedding dimensionality.")
-    parser.add_argument("--rdim", type=int, default=200, nargs="?",
+    parser.add_argument("--rdim", type=int, default=100, nargs="?",
                     help="Relation embedding dimensionality.")
     parser.add_argument("--cuda", type=bool, default=True, nargs="?",
                     help="Whether to use cuda (GPU) or not (CPU).")
@@ -255,7 +291,7 @@ if __name__ == '__main__':
 
     args = parser.parse_args()
     dataset = args.dataset
-    print(args)
+    print(dataset)
     print("*"*20)
     save_dir = "checkpoint/%s/" % dataset
     data_dir = "data/%s/" % dataset
