@@ -119,8 +119,8 @@ class Experiment:
 
         valid_res, test_res = 0., 0. 
         best_epoch = 0
-        model = TuckER(d, self.ent_vec_dim, self.rel_vec_dim, **self.kwargs)
-        # model = MLP_2(d, self.ent_vec_dim, self.rel_vec_dim, **self.kwargs)
+        # model = TuckER(d, self.ent_vec_dim, self.rel_vec_dim, **self.kwargs)
+        model = MLP_1(d, self.ent_vec_dim, self.rel_vec_dim, **self.kwargs)
         if self.cuda:
             model.cuda()
         model.init()
@@ -170,7 +170,7 @@ class Experiment:
                     if test_MRR > test_res:
                         test_res = test_MRR
                         best_epoch = it
-                        self.save_model(model, save_dir)
+                        # self.save_model(model, save_dir)
                         # if test_res > args.best_result:
                         #     self.save_model(model, save_dir)
                     print(time.time()-start_test)

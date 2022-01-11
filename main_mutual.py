@@ -7,17 +7,7 @@ from model import *
 from torch.optim.lr_scheduler import ExponentialLR
 import argparse
 from matplotlib import pyplot as plt
-import os
-import random
-
-def setup_seed(SEED, setup_pytorch=True):
-    os.environ["PYTHONHASHSEED"] = str(SEED)
-    random.seed(SEED)
-    np.random.seed(SEED)
-    if setup_pytorch:
-        import torch
-
-        torch.random.manual_seed(SEED)
+    
 class Experiment:
 
     def __init__(self, learning_rate=0.0005, ent_vec_dim=200, rel_vec_dim=200, 
@@ -57,12 +47,12 @@ class Experiment:
             targets = targets.cuda()
         return np.array(batch), targets
 
-    def save_model(self, model, save_dir, name):
+    def save_model(self, model, save_dir):
         print("Saving Model")
-        torch.save(model.state_dict(), (save_dir + "{}.pth").format("best_model"+name))
+        torch.save(model.state_dict(), (save_dir + "{}.pth").format("best_teacher_model"))
         print("Done saving Model")
 
-    def evaluate(self, model, data):
+    def evaluate(self, model_1, model_2, data):
         hits = []
         ranks = []
         for i in range(10):
@@ -86,8 +76,11 @@ class Experiment:
                 r_idx = r_idx.cuda()
                 e2_idx = e2_idx.cuda()
             # get predict score [batchsize, entity_type_size]
-            model.eval()
-            predictions = model.forward(e1_idx, r_idx)
+            model_1.eval()
+            model_2.eval()
+            predictions_1 = model_1.forward(e1_idx, r_idx)
+            predictions_2 = model_2.forward(e1_idx, r_idx)
+            predictions = (predictions_1+predictions_2)/2
 
             for j in range(data_batch.shape[0]):
                 # filter exist correct triple, set the corresponding scores as 0, 
@@ -129,21 +122,20 @@ class Experiment:
 
         valid_res, test_res = 0., 0. 
         best_epoch = 0
-        model = TuckER(d, self.ent_vec_dim, self.rel_vec_dim, **self.kwargs)
-        model_T = TuckER(d, self.ent_vec_dim, self.rel_vec_dim, **self.kwargs)
-        # model = MLP_2(d, self.ent_vec_dim, self.rel_vec_dim, **self.kwargs)
+        model_1 = TuckER(d, self.ent_vec_dim, self.rel_vec_dim, **self.kwargs)
+        model_2 = TuckER(d, self.ent_vec_dim, self.rel_vec_dim, **self.kwargs)
+        # model = MLP_1(d, self.ent_vec_dim, self.rel_vec_dim, **self.kwargs)
         if self.cuda:
-            model.cuda()
-            model_T.cuda()
-        model.init()
+            model_1.cuda()
+            model_2.cuda()
+        model_1.init()
+        model_2.init()
+        opt_1 = torch.optim.Adam(model_1.parameters(), lr=self.learning_rate)
+        opt_2 = torch.optim.Adam(model_2.parameters(), lr=self.learning_rate)
 
-        PATH = (save_dir + "{}.pth").format("best_teacher_model")
-        model_T.load_state_dict(torch.load(PATH), strict=False)
-        model_T.eval()
-
-        opt = torch.optim.Adam(model.parameters(), lr=self.learning_rate)
         if self.decay_rate:
-            scheduler = ExponentialLR(opt, self.decay_rate)
+            scheduler_1 = ExponentialLR(opt_1, self.decay_rate)
+            scheduler_2 = ExponentialLR(opt_2, self.decay_rate)
 
         er_vocab = self.get_er_vocab(train_data_idxs) # {(head,rel):[tail]}
         er_vocab_pairs = list(er_vocab.keys()) # head&rel
@@ -151,50 +143,53 @@ class Experiment:
         print("Starting training...")
         for it in range(1, self.num_iterations+1):
             start_train = time.time()
-            model.train()    
+            model_1.train()
+            model_2.train()    
             losses = []
             np.random.shuffle(er_vocab_pairs)
             for j in range(0, len(er_vocab_pairs), self.batch_size):
                 ## 这里怎么有点一直在重复取的感觉，哦没有,它是间距batch_size
                 data_batch, targets = self.get_batch(er_vocab, er_vocab_pairs, j)
-                opt.zero_grad()
+                opt_1.zero_grad()
+                opt_2.zero_grad()
                 e1_idx = torch.tensor(data_batch[:,0])
                 r_idx = torch.tensor(data_batch[:,1])  
                 if self.cuda:
                     e1_idx = e1_idx.cuda()
                     r_idx = r_idx.cuda()
+                predictions_1 = model_1.forward(e1_idx, r_idx)
+                predictions_2 = model_2.forward(e1_idx, r_idx)
                 if self.label_smoothing:
-                    targets = ((1.0-self.label_smoothing)*targets) + (1.0/targets.size(1)) 
-                predictions = model.forward(e1_idx, r_idx)
-                # from teacher learing
-                if it <= 200:
-                    teacher_target = self.get_T_pred(model_T, e1_idx, r_idx, er_vocab, data_batch, 3)
-                    teacher_target = ((1.0-self.label_smoothing)*teacher_target) + (1.0/targets.size(1))
-                    loss = model.loss(predictions, targets) + 0.5*model.loss(predictions, teacher_target)
-                else:
-                    loss = model.loss(predictions, targets) 
-                # loss = model.loss(predictions, teacher_target)
+                    targets = ((1.0-self.label_smoothing)*targets) + (1.0/targets.size(1))           
+                loss = model_1.loss(predictions_1, targets) + model_2.loss(predictions_2, targets) + torch.mean((predictions_1-predictions_2)**2)
                 loss.backward()
-                opt.step()
+                opt_1.step()
+                opt_2.step()
+
                 losses.append(loss.item())
             if self.decay_rate:
-                scheduler.step()
+                scheduler_1.step()
+                scheduler_2.step()
             print(it)
             print(time.time()-start_train)    
             print(np.mean(losses))
-            model.eval()
+            # exit()
+            model_1.eval()
+            model_2.eval()
             with torch.no_grad():
                 print("Validation:")
-                valid_MRR = self.evaluate(model, d.valid_data)
+                valid_MRR = self.evaluate(model_1, model_2, d.valid_data)
                 valid_res = max(valid_res, valid_MRR)
                 if not it%2:
                     print("Test:")
                     start_test = time.time()
-                    test_MRR = self.evaluate(model, d.test_data)
+                    test_MRR = self.evaluate(model_1, model_2, d.test_data)
                     if test_MRR > test_res:
                         test_res = test_MRR
                         best_epoch = it
-                        # self.save_model(model, save_dir, "student")
+                        # self.save_model(model, save_dir)
+                        # if test_res > args.best_result:
+                        #     self.save_model(model, save_dir)
                     print(time.time()-start_test)
         print("Best result : valid {0} test {1}".format(valid_res,test_res))
         print("Best epoch is {0}".format(best_epoch))
@@ -243,33 +238,6 @@ class Experiment:
                 # plt.show()
                 plt.savefig("pic/{}.png".format(j))
             break
-    
-    def get_T_pred(self, model_T, e1_idx, r_idx, er_vocab, batch, PN):
-        batch = [tuple(i) for i in batch.tolist()]
-        pred = model_T.forward(e1_idx, r_idx) # batch_size * ent_size
-        sort_values, sort_idxs = torch.sort(pred, dim=1, descending=True)
-        targets = np.zeros((len(batch), len(d.entities)))
-        sort_values = sort_values.cpu().detach().numpy()
-        sort_idxs = sort_idxs.cpu().numpy()
-        for j in range(len(batch)):
-            train_tail = er_vocab[batch[j]]
-            t_idx = len(train_tail)+PN
-            # targets[j,sort_idxs[j,:t_idx]] = sort_values[j,:t_idx]+0.5
-            targets[j,sort_idxs[j,:t_idx]] = 1.0
-            # print("--"*15)
-            # print(train_tail)
-            # print(sort_idxs[j,:t_idx])
-            # print(sort_values[j,:t_idx])
-            # print("--"*15)
-        targets = torch.FloatTensor(targets)
-        if self.cuda:
-            targets = targets.cuda()
-        return targets   
-
-
-
-
-
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -285,7 +253,7 @@ if __name__ == '__main__':
                     help="Decay rate.")
     parser.add_argument("--edim", type=int, default=200, nargs="?",
                     help="Entity embedding dimensionality.")
-    parser.add_argument("--rdim", type=int, default=100, nargs="?",
+    parser.add_argument("--rdim", type=int, default=200, nargs="?",
                     help="Relation embedding dimensionality.")
     parser.add_argument("--cuda", type=bool, default=True, nargs="?",
                     help="Whether to use cuda (GPU) or not (CPU).")
@@ -304,12 +272,12 @@ if __name__ == '__main__':
 
     args = parser.parse_args()
     dataset = args.dataset
-    print(dataset)
+    print(args)
     print("*"*20)
     save_dir = "checkpoint/%s/" % dataset
     data_dir = "data/%s/" % dataset
     torch.backends.cudnn.deterministic = True 
-    seed = 2021
+    seed = 20
     np.random.seed(seed)
     torch.manual_seed(seed)
     if torch.cuda.is_available:
@@ -324,8 +292,3 @@ if __name__ == '__main__':
     experiment.train_and_eval(args)
     print(dataset)
     # experiment.pred_plot(save_dir, d.test_data)
-
-
-    
-                
-
