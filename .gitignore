@@ -3,3 +3,4 @@ data
 pic
 checkpoint/
 log/*
+__pycache__/*

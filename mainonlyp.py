@@ -1,5 +1,6 @@
 from load_data import Data
 import numpy as np
+import copy
 import torch
 import time
 from collections import defaultdict
@@ -40,8 +41,8 @@ class Experiment:
         batch = er_vocab_pairs[idx:idx+self.batch_size]
         targets = np.zeros((len(batch), len(d.entities)))
         ## 对应的源实体关系 对应的目标实体为1
-        for idx, pair in enumerate(batch):
-            targets[idx, er_vocab[pair]] = 1.
+        # for idx, pair in enumerate(batch):
+        #     targets[idx, er_vocab[pair]] = 1.
         targets = torch.FloatTensor(targets)
         if self.cuda:
             targets = targets.cuda()
@@ -52,7 +53,7 @@ class Experiment:
         torch.save(model.state_dict(), (save_dir + "{}.pth").format("best_teacher_model"))
         print("Done saving Model")
 
-    def evaluate(self, model_1, model_2, data):
+    def evaluate(self, model, data):
         hits = []
         ranks = []
         for i in range(10):
@@ -76,11 +77,8 @@ class Experiment:
                 r_idx = r_idx.cuda()
                 e2_idx = e2_idx.cuda()
             # get predict score [batchsize, entity_type_size]
-            model_1.eval()
-            model_2.eval()
-            predictions_1 = model_1.forward(e1_idx, r_idx)
-            predictions_2 = model_2.forward(e1_idx, r_idx)
-            predictions = (predictions_1+predictions_2)/2
+            model.eval()
+            predictions = model.forward(e1_idx, r_idx)
 
             for j in range(data_batch.shape[0]):
                 # filter exist correct triple, set the corresponding scores as 0, 
@@ -122,20 +120,14 @@ class Experiment:
 
         valid_res, test_res = 0., 0. 
         best_epoch = 0
-        model_1 = TuckER(d, self.ent_vec_dim, self.rel_vec_dim, **self.kwargs)
-        model_2 = TuckER(d, self.ent_vec_dim, self.rel_vec_dim, **self.kwargs)
+        model = TuckER(d, self.ent_vec_dim, self.rel_vec_dim, **self.kwargs)
         # model = MLP_1(d, self.ent_vec_dim, self.rel_vec_dim, **self.kwargs)
         if self.cuda:
-            model_1.cuda()
-            model_2.cuda()
-        model_1.init()
-        model_2.init()
-        opt_1 = torch.optim.Adam(model_1.parameters(), lr=self.learning_rate)
-        opt_2 = torch.optim.Adam(model_2.parameters(), lr=self.learning_rate)
-
+            model.cuda()
+        model.init()
+        opt = torch.optim.Adam(model.parameters(), lr=self.learning_rate)
         if self.decay_rate:
-            scheduler_1 = ExponentialLR(opt_1, self.decay_rate)
-            scheduler_2 = ExponentialLR(opt_2, self.decay_rate)
+            scheduler = ExponentialLR(opt, self.decay_rate)
 
         er_vocab = self.get_er_vocab(train_data_idxs) # {(head,rel):[tail]}
         er_vocab_pairs = list(er_vocab.keys()) # head&rel
@@ -143,47 +135,43 @@ class Experiment:
         print("Starting training...")
         for it in range(1, self.num_iterations+1):
             start_train = time.time()
-            model_1.train()
-            model_2.train()    
+            model.train()    
             losses = []
             np.random.shuffle(er_vocab_pairs)
             for j in range(0, len(er_vocab_pairs), self.batch_size):
                 ## 这里怎么有点一直在重复取的感觉，哦没有,它是间距batch_size
                 data_batch, targets = self.get_batch(er_vocab, er_vocab_pairs, j)
-                opt_1.zero_grad()
-                opt_2.zero_grad()
+                opt.zero_grad()
                 e1_idx = torch.tensor(data_batch[:,0])
                 r_idx = torch.tensor(data_batch[:,1])  
                 if self.cuda:
                     e1_idx = e1_idx.cuda()
                     r_idx = r_idx.cuda()
-                predictions_1 = model_1.forward(e1_idx, r_idx)
-                predictions_2 = model_2.forward(e1_idx, r_idx)
-                if self.label_smoothing:
-                    targets = ((1.0-self.label_smoothing)*targets) + (1.0/targets.size(1))           
-                loss = model_1.loss(predictions_1, targets) + model_2.loss(predictions_2, targets) + torch.mean((predictions_1-predictions_2)**2)
+                predictions = model.forward(e1_idx, r_idx)
+                with torch.no_grad():
+                    targets = predictions.clone()
+                positive_target = 1.0 - self.label_smoothing + (1.0/targets.size(1))
+                data_batch = [tuple(i) for i in data_batch.tolist()]
+                for idx, pair in enumerate(data_batch):
+                    targets[idx, er_vocab[pair]] = positive_target        
+                loss = torch.mean((targets-predictions)**2)
                 loss.backward()
-                opt_1.step()
-                opt_2.step()
-
+                opt.step()
                 losses.append(loss.item())
             if self.decay_rate:
-                scheduler_1.step()
-                scheduler_2.step()
+                scheduler.step()
             print(it)
             print(time.time()-start_train)    
             print(np.mean(losses))
-            # exit()
-            if it % 5==0:
-                model_1.eval()
-                model_2.eval()
-                with torch.no_grad():
-                    print("Validation:")
-                    valid_MRR = self.evaluate(model_1, model_2, d.valid_data)
-                    valid_res = max(valid_res, valid_MRR)
+            model.eval()
+            with torch.no_grad():
+                print("Validation:")
+                valid_MRR = self.evaluate(model, d.valid_data)
+                valid_res = max(valid_res, valid_MRR)
+                if not it%2:
                     print("Test:")
                     start_test = time.time()
-                    test_MRR = self.evaluate(model_1, model_2, d.test_data)
+                    test_MRR = self.evaluate(model, d.test_data)
                     if test_MRR > test_res:
                         test_res = test_MRR
                         best_epoch = it
@@ -243,11 +231,11 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset", type=str, default="FB15k-237", nargs="?",
                     help="Which dataset to use: FB15k, FB15k-237, WN18 or WN18RR.")
-    parser.add_argument("--num_iterations", type=int, default=10, nargs="?",
+    parser.add_argument("--num_iterations", type=int, default=100, nargs="?",
                     help="Number of iterations.")
     parser.add_argument("--batch_size", type=int, default=128, nargs="?",
                     help="Batch size.")
-    parser.add_argument("--lr", type=float, default=0.0005, nargs="?",
+    parser.add_argument("--lr", type=float, default=0.001, nargs="?",
                     help="Learning rate.")
     parser.add_argument("--dr", type=float, default=1.0, nargs="?",
                     help="Decay rate.")
@@ -292,3 +280,8 @@ if __name__ == '__main__':
     experiment.train_and_eval(args)
     print(dataset)
     # experiment.pred_plot(save_dir, d.test_data)
+
+
+    
+                
+
